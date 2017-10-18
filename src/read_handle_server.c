@@ -335,7 +335,7 @@ int mqtt3_handle_connect(struct mosquitto_db *db, struct mosquitto *context)
 	}
 
 #ifdef WITH_TLS
-	if(context->listener && context->listener->ssl_ctx && context->listener->use_identity_as_username){
+	if(context->listener && context->listener->ssl_ctx && (context->listener->use_identity_as_username || context->listener->use_subject_as_username)){
 		if(!context->ssl){
 			_mosquitto_send_connack(context, 0, CONNACK_REFUSED_BAD_USERNAME_PASSWORD);
 			rc = 1;
@@ -363,15 +363,33 @@ int mqtt3_handle_connect(struct mosquitto_db *db, struct mosquitto *context)
 				rc = 1;
 				goto handle_connect_error;
 			}
-
-			i = X509_NAME_get_index_by_NID(name, NID_commonName, -1);
-			if(i == -1){
-				_mosquitto_send_connack(context, 0, CONNACK_REFUSED_BAD_USERNAME_PASSWORD);
-				rc = 1;
-				goto handle_connect_error;
+			if (context->listener->use_identity_as_username) { //use_identity_as_username
+				i = X509_NAME_get_index_by_NID(name, NID_commonName, -1);
+				if(i == -1){
+					_mosquitto_send_connack(context, 0, CONNACK_REFUSED_BAD_USERNAME_PASSWORD);
+					rc = 1;
+					goto handle_connect_error;
+				}
+				name_entry = X509_NAME_get_entry(name, i);
+				if(name_entry){
+					context->username = _mosquitto_strdup((char *)ASN1_STRING_data(X509_NAME_ENTRY_get_data(name_entry)));
+				}
+			} else { // use_subject_as_username
+				BIO *subject_bio = BIO_new(BIO_s_mem());
+				X509_NAME_print_ex(subject_bio, X509_get_subject_name(client_cert), 0, XN_FLAG_RFC2253);
+				char *data_start = NULL;
+				long name_length = BIO_get_mem_data(subject_bio, &data_start);
+				char *subject = _mosquitto_malloc(sizeof(char)*name_length+1);
+				if(!subject){
+					BIO_free(subject_bio);
+					rc = MOSQ_ERR_NOMEM;
+					goto handle_connect_error;
+				}
+				memcpy(subject, data_start, name_length);
+				subject[name_length] = '\0';
+				BIO_free(subject_bio);
+				context->username = subject;
 			}
-			name_entry = X509_NAME_get_entry(name, i);
-			context->username = _mosquitto_strdup((char *)ASN1_STRING_data(X509_NAME_ENTRY_get_data(name_entry)));
 			if(!context->username){
 				rc = 1;
 				goto handle_connect_error;
